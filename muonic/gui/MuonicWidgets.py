@@ -8,9 +8,9 @@ from PyQt4 import QtGui
 from PyQt4 import QtCore
 
 #muonic imports
-from LineEdit import LineEdit
-from MuonicPlotCanvases import ScalarsCanvas,LifetimeCanvas,PulseCanvas,VelocityCanvas,PulseWidthCanvas
-from MuonicDialogs import DecayConfigDialog,PeriodicCallDialog, VelocityConfigDialog, FitRangeConfigDialog
+from .LineEdit import LineEdit
+from .MuonicPlotCanvases import ScalarsCanvas,LifetimeCanvas,PulseCanvas,VelocityCanvas,PulseWidthCanvas
+from .MuonicDialogs import DecayConfigDialog,PeriodicCallDialog, VelocityConfigDialog, FitRangeConfigDialog
 from ..analysis.fit import main as fit
 from ..analysis.fit import gaussian_fit
 from ..analysis.PulseAnalyzer import VelocityTrigger,DecayTriggerThorough
@@ -38,21 +38,29 @@ class RateWidget(QtGui.QWidget):
         self.logger           = logger
         self.run              = False
         self.scalers_result   = False
-        self.MAXLENGTH = 40
+        self.MAXLENGTH        = 40
         self.scalers_monitor  = ScalarsCanvas(self, logger, self.MAXLENGTH)
         self.rate_mes_start   = datetime.datetime.now()
         self.previous_ch_counts = {"ch0" : 0 ,"ch1" : 0,"ch2" : 0,"ch3": 0}
         self.ch_counts = {"ch0" : 0 ,"ch1" : 0,"ch2" : 0,"ch3": 0}
-        self.timewindow = 0
         self.now = datetime.datetime.now()
-        self.lastscalerquery = 0
-        self.thisscalerquery = time.time()
+        # define the begin of the timeintervall
+        # for the rate calculation
+        self.lastscalarquery = 0
+        self.thisscalarquery = time.time()
+        self.timewindow = 0
         self.do_not_show_trigger = False
-
+        # prepare fields for scalars
+        self.scalars_ch0_previous = 0
+        self.scalars_ch1_previous = 0
+        self.scalars_ch2_previous = 0
+        self.scalars_ch3_previous = 0
+        self.scalars_trigger_previous = 0
+        self.scalars_time = 0
         self.start_button = QtGui.QPushButton(tr('MainWindow', 'Start run'))
         self.stop_button = QtGui.QPushButton(tr('MainWindow', 'Stop run'))
         self.label_mean_rates = QtGui.QLabel(tr('MainWindow','mean rates:'))
-        self.label_total_scalers = QtGui.QLabel(tr('MainWindow','total scalers:'))
+        self.label_total_scalers = QtGui.QLabel(tr('MainWindow','total counts:'))
         self.label_started = QtGui.QLabel(tr('MainWindow','started:'))
         self.rates = dict()
         self.rates['rates']= None
@@ -63,7 +71,7 @@ class RateWidget(QtGui.QWidget):
         self.table = QtGui.QTableWidget(5,2,self)
         self.table.setColumnWidth(0,85)
         self.table.setColumnWidth(1,60)
-        self.table.setHorizontalHeaderLabels(["rate [Hz]","scaler"])
+        self.table.setHorizontalHeaderLabels(["rate [1/s]","counts"])
         self.table.setVerticalHeaderLabels(["channel 0","channel 1","channel 2","channel 3","trigger"])
         self.table.horizontalHeader().setStretchLastSection(True)
         self.scalers = dict()
@@ -78,7 +86,6 @@ class RateWidget(QtGui.QWidget):
             self.rates[cn[1]].setFlags(QtCore.Qt.ItemIsEditable)
             #self.rates[cn[1]].setFlags(QtCore.Qt.ItemIsSelectable)
             self.rates[cn[1]].setFlags(QtCore.Qt.ItemIsEnabled)
-            
             self.table.setItem(cn[0], 1, self.scalers[cn[1]])
             self.scalers[cn[1]].setFlags(QtCore.Qt.ItemIsEditable)
             self.scalers[cn[1]].setFlags(QtCore.Qt.ItemIsSelectable)
@@ -100,10 +107,8 @@ class RateWidget(QtGui.QWidget):
         self.general_info['max_rate'] = 0
         self.general_info['min_rate'] = 0
 
-        #self.pulses_to_show = None
         self.data_file = open(self.mainwindow.filename, 'w')
         self.data_file.write('chan0 | chan1 | chan2 | chan3 | R0 | R1 | R2 | R3 | trigger | Delta_time \n')
-#        self.data_file.close()
         # always write the rate plot data
         self.data_file_write = False
 
@@ -151,21 +156,62 @@ class RateWidget(QtGui.QWidget):
         rate_widget.addWidget(buttomlineBox,4,0,1,3)
         self.setLayout(rate_widget)
 
-    def calculate(self,rates):
-        #now = time.time()
-        #self.thisscalerquery = now - self.lastscalerquery
-        #self.lastscalerquery = now
+    def query_daq_for_scalars(self):
+        self.lastscalarquery = self.thisscalarquery
+        self.mainwindow.daq.put("DS")
+        self.thisscalarquery = time.time()
+
+    def calculate(self):
+        """
+        Get the rates from the observed counts
+        by dividing by the measurement interval
+        """
+        msg = self.mainwindow.daq_msg
+        if not (len(msg) >= 2 and msg[0]=='D' and msg[1] == 'S'):
+            return False
+
+        scalars = msg.split()
+        for item in scalars:
+            if ("S0" in item) & (len(item) == 11):
+                scalars_ch0 = int(item[3:],16)
+            elif ("S1" in item) & (len(item) == 11):
+                scalars_ch1 = int(item[3:],16)
+            elif ("S2" in item) & (len(item) == 11):
+                scalars_ch2 = int(item[3:],16)
+            elif ("S3" in item) & (len(item) == 11):
+                scalars_ch3 = int(item[3:],16)
+            elif ("S4" in item) & (len(item) == 11):
+                scalars_trigger = int(item[3:],16)
+            elif ("S5" in item) & (len(item) == 11):
+                scalars_time = float(int(item[3:],16))
+            #else:
+                #self.logger.debug("unknown item detected: %s" %item.__repr__())
+        self.scalars_diff_ch0     = scalars_ch0     - self.scalars_ch0_previous
+        self.scalars_diff_ch1     = scalars_ch1     - self.scalars_ch1_previous
+        self.scalars_diff_ch2     = scalars_ch2     - self.scalars_ch2_previous
+        self.scalars_diff_ch3     = scalars_ch3     - self.scalars_ch3_previous
+        self.scalars_diff_trigger = scalars_trigger - self.scalars_trigger_previous
+        self.scalars_ch0_previous     = scalars_ch0
+        self.scalars_ch1_previous     = scalars_ch1
+        self.scalars_ch2_previous     = scalars_ch2
+        self.scalars_ch3_previous     = scalars_ch3
+        self.scalars_trigger_previous = scalars_trigger
+
+        time_window = self.thisscalarquery - self.lastscalarquery
+        rates = (self.scalars_diff_ch0/time_window,\
+                 self.scalars_diff_ch1/time_window,\
+                 self.scalars_diff_ch2/time_window,\
+                 self.scalars_diff_ch3/time_window,\
+                 self.scalars_diff_trigger/time_window,\
+                 time_window,\
+                 self.scalars_diff_ch0,\
+                 self.scalars_diff_ch1,\
+                 self.scalars_diff_ch2,\
+                 self.scalars_diff_ch3,\
+                 self.scalars_diff_trigger)
+
         self.rates['rates'] = rates
-        self.timewindow += rates[5]
-        self.rates['rates_buffer']['ch0'].append(rates[0])
-        self.rates['rates_buffer']['ch1'].append(rates[1])
-        self.rates['rates_buffer']['ch2'].append(rates[2])
-        self.rates['rates_buffer']['ch3'].append(rates[3])
-        self.rates['rates_buffer']['trigger'].append(rates[4])
-        self.rates['rates_buffer']['l_time'].append(self.timewindow)
-        for ch in ['ch0','ch1','ch2','ch3','l_time','trigger']:
-            if len(self.rates['rates_buffer'][ch]) > self.MAXLENGTH:
-                self.rates['rates_buffer'][ch].remove(self.rates['rates_buffer'][ch][0])
+        self.timewindow += time_window
 
         self.scalers['scalers_buffer']['ch0'] += rates[6]
         self.scalers['scalers_buffer']['ch1'] += rates[7]
@@ -173,40 +219,64 @@ class RateWidget(QtGui.QWidget):
         self.scalers['scalers_buffer']['ch3'] += rates[9]
         self.scalers['scalers_buffer']['trigger'] += rates[10]
 
-        max_rate = max( max(self.rates['rates_buffer']['ch0']), max(self.rates['rates_buffer']['ch1']), max(self.rates['rates_buffer']['ch2']), 
-                   max(self.rates['rates_buffer']['ch3']))
-        min_rate = min( min(self.rates['rates_buffer']['ch0']), min(self.rates['rates_buffer']['ch1']), min(self.rates['rates_buffer']['ch2']), 
-                       min(self.rates['rates_buffer']['ch3']))
+        max_rate = max([rates[i] for i in range(5)])
+        min_rate = min([rates[i] for i in range(5)])
         if max_rate > self.general_info['max_rate']:
             self.general_info['max_rate'] = max_rate
         if min_rate < self.general_info['min_rate']:
             self.general_info['max_rate'] = min_rate
 
+        #write the rates to data file
+        # we have to catch IOErrors, can occur if program is
+        # exited
+        if self.data_file_write:
+            try:
+                self.data_file.write('%f %f %f %f %f %f %f %f %f %f \n' % (self.scalars_diff_ch0,\
+                                                                           self.scalars_diff_ch1,\
+                                                                           self.scalars_diff_ch2,\
+                                                                           self.scalars_diff_ch3,\
+                                                                           rates[0],\
+                                                                           rates[1],\
+                                                                           rates[2],\
+                                                                           rates[3],\
+                                                                           rates[4],\
+                                                                           rates[5]))
+                self.logger.debug("Rate plot data was written to %s" %self.data_file.__repr__())
+            except ValueError:
+                self.logger.warning("ValueError, Rate plot data was not written to %s" %self.data_file.__repr__())
+        return True # succesful!
+
     def update(self):
+        """
+        Display newly available data
+        """
         if self.run:
+            self.query_daq_for_scalars()
+            if self.timewindow == 0:
+                return
             self.general_info['edit_daq_time'].setText('%.2f s' %(self.timewindow))
-            self.general_info['edit_max_rate'].setText('%.2f Hz' %(self.general_info['max_rate']))
+            self.general_info['edit_max_rate'].setText('%.2f 1/s' %(self.general_info['max_rate']))
             if self.mainwindow.channelcheckbox_0:
                 self.rates['edit_ch0'].setText('%.2f' %(self.scalers['scalers_buffer']['ch0']/self.timewindow))
-                self.scalers['edit_ch0'].setText('%.2f' %(self.scalers['scalers_buffer']['ch0']))
+                self.scalers['edit_ch0'].setText('%i' %(self.scalers['scalers_buffer']['ch0']))
             else:
                 self.rates['edit_ch0'].setText('off')
                 self.scalers['edit_ch0'].setText('off')
             if self.mainwindow.channelcheckbox_1:
                 self.rates['edit_ch1'].setText('%.2f' %(self.scalers['scalers_buffer']['ch1']/self.timewindow))
-                self.scalers['edit_ch1'].setText('%.2f' %(self.scalers['scalers_buffer']['ch1']))
+                self.scalers['edit_ch1'].setText('%i' %(self.scalers['scalers_buffer']['ch1']))
             else:
                 self.rates['edit_ch1'].setText('off')
                 self.scalers['edit_ch1'].setText('off')
             if self.mainwindow.channelcheckbox_2:
                 self.rates['edit_ch2'].setText('%.2f' %(self.scalers['scalers_buffer']['ch2']/self.timewindow))
-                self.scalers['edit_ch2'].setText('%.2f' %(self.scalers['scalers_buffer']['ch2']))
+                self.scalers['edit_ch2'].setText('%i' %(self.scalers['scalers_buffer']['ch2']))
             else:
                 self.rates['edit_ch2'].setText('off')
                 self.scalers['edit_ch2'].setText('off')
             if self.mainwindow.channelcheckbox_3:
                 self.rates['edit_ch3'].setText('%.2f' %(self.scalers['scalers_buffer']['ch3']/self.timewindow))
-                self.scalers['edit_ch3'].setText('%.2f' %(self.scalers['scalers_buffer']['ch3']))
+                self.scalers['edit_ch3'].setText('%i' %(self.scalers['scalers_buffer']['ch3']))
             else:
                 self.rates['edit_ch3'].setText('off')
                 self.scalers['edit_ch3'].setText('off')
@@ -216,11 +286,17 @@ class RateWidget(QtGui.QWidget):
                 self.scalers['edit_trigger'].setText('off')
             else:
                 self.rates['edit_trigger'].setText('%.2f' %(self.scalers['scalers_buffer']['trigger']/self.timewindow))
-                self.scalers['edit_trigger'].setText('%.2f' %(self.scalers['scalers_buffer']['trigger']))
+                self.scalers['edit_trigger'].setText('%i' %(self.scalers['scalers_buffer']['trigger']))
 
-            self.scalers_monitor.update_plot(self.rates['rates'],self.do_not_show_trigger,self.mainwindow.channelcheckbox_0,self.mainwindow.channelcheckbox_1,self.mainwindow.channelcheckbox_2,self.mainwindow.channelcheckbox_3)
-      
-    def is_active(self):
+            self.scalers_monitor.update_plot(self.rates['rates'],\
+                                             self.do_not_show_trigger,\
+                                             self.mainwindow.channelcheckbox_0,\
+                                             self.mainwindow.channelcheckbox_1,\
+                                             self.mainwindow.channelcheckbox_2,\
+                                             self.mainwindow.channelcheckbox_3)
+
+    @property
+    def active(self):
         return self.run # rate widget is always active    
 
     def startClicked(self):
@@ -229,8 +305,6 @@ class RateWidget(QtGui.QWidget):
         """
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
-        self.mainwindow.query_daq_for_scalars()
-        self.mainwindow.daq.put('DC') # FIXME:  why is this necessary
         time.sleep(0.2)
         self.table.setEnabled(True)
 
@@ -243,11 +317,16 @@ class RateWidget(QtGui.QWidget):
         for ch in ['ch0','ch1','ch2','ch3','l_time','trigger']:
             self.rates['rates_buffer'][ch] = []
 
-        comment_file = '# new rate measurement run from: %i-%i-%i %i-%i-%i\n' %(date.tm_year,date.tm_mon,date.tm_mday,date.tm_hour,date.tm_min,date.tm_sec)
-        if self.mainwindow.tabwidget.decaywidget.is_active():
-            comment_file = '# new decay measurement run from: %i-%i-%i %i-%i-%i\n' %(date.tm_year,date.tm_mon,date.tm_mday,date.tm_hour,date.tm_min,date.tm_sec)
-        if self.mainwindow.tabwidget.velocitywidget.is_active():
-            comment_file = '# new velocity measurement run from: %i-%i-%i %i-%i-%i\n' %(date.tm_year,date.tm_mon,date.tm_mday,date.tm_hour,date.tm_min,date.tm_sec)
+        comment_file = '# new rate measurement run from: %i-%i-%i %i-%i-%i\n'\
+                       %(date.tm_year,date.tm_mon,date.tm_mday,date.tm_hour,date.tm_min,date.tm_sec)
+
+        #FIXME: This does not belong here
+        #if self.mainwindow.tabwidget.decaywidget.active:
+        #    comment_file = '# new decay measurement run from: %i-%i-%i %i-%i-%i\n'\
+        #                   %(date.tm_year,date.tm_mon,date.tm_mday,date.tm_hour,date.tm_min,date.tm_sec)
+        #if self.mainwindow.tabwidget.velocitywidget.active:
+        #    comment_file = '# new velocity measurement run from: %i-%i-%i %i-%i-%i\n'\
+        #                   %(date.tm_year,date.tm_mon,date.tm_mday,date.tm_hour,date.tm_min,date.tm_sec)
 
 
         self.data_file = open(self.mainwindow.filename, 'a')        
@@ -278,7 +357,7 @@ class RateWidget(QtGui.QWidget):
             self.rates['edit_trigger'].setText('off')
             self.scalers['edit_trigger'].setText('off')
 
-        self.scalers_monitor.reset()
+        self.scalers_monitor.reset(show_pending=True)
         #time.sleep(3)
         #self.start_button.setEnabled(True)
         
@@ -337,16 +416,15 @@ class PulseanalyzerWidget(QtGui.QWidget):
         self.pulsewidths = []
         self.active = False
 
-    def is_active(self):
-        return self.active
-
-
-    def calculate(self,pulses):
-        self.pulses = pulses
+    def calculate(self):
+        self.pulses = self.mainwindow.pulses
+        if self.pulses is None:
+            self.logger.debug("Not received any pulses")
+            return None
         # pulsewidths changed because falling edge can be None.
         # pulsewidths = [fe - le for chan in pulses[1:] for le,fe in chan]
         pulsewidths = []
-        for chan in pulses[1:]:
+        for chan in self.pulses[1:]:
             for le, fe in chan:
                 if fe is not None:
                     pulsewidths.append(fe - le)
@@ -388,7 +466,6 @@ class PulseanalyzerWidget(QtGui.QWidget):
                     self.mainwindow.pulseextractor.pulsefile.close()
                 self.mainwindow.pulseextractor.pulsefile = False
 
-
 class StatusWidget(QtGui.QWidget): # not used yet
     """
     Provide a widget which shows the status informations of the DAQ and the muonic software
@@ -397,9 +474,7 @@ class StatusWidget(QtGui.QWidget): # not used yet
         QtGui.QWidget.__init__(self,parent=parent)
         self.mainwindow = self.parentWidget()
         self.logger = logger
-
         self.active = True
-
         # more functional objects
 
         self.muonic_stats = dict()
@@ -559,9 +634,7 @@ class StatusWidget(QtGui.QWidget): # not used yet
         self.logger.debug("Saving status information to file.")
         self.logger.warning('Currently not available!')
 
-    def is_active(self):
-        return self.active
-        
+
     def update(self):
         """
         Fill the status information in the widget.
@@ -620,7 +693,7 @@ class StatusWidget(QtGui.QWidget): # not used yet
             self.muonic_stats['open_files'] = str(self.mainwindow.filename)
             if self.mainwindow.tabwidget.daqwidget.write_file:
                 self.muonic_stats['open_files'] += ', ' + self.mainwindow.rawfilename
-            if self.mainwindow.tabwidget.decaywidget.is_active():
+            if self.mainwindow.tabwidget.decaywidget.active:
                 self.muonic_stats['open_files'] += ', ' + self.mainwindow.decayfilename
             if self.mainwindow.writepulses:
                 self.muonic_stats['open_files'] += ', ' + self.mainwindow.pulsefilename
@@ -633,13 +706,13 @@ class StatusWidget(QtGui.QWidget): # not used yet
             #self.last_path.setText(self.muonic_stats['last_path'])
             #self.last_path.setEnabled(True)
             measurements = ''
-            if self.mainwindow.tabwidget.ratewidget.is_active():
+            if self.mainwindow.tabwidget.ratewidget.active:
                 measurements = 'Muon Rates'
-            if self.mainwindow.tabwidget.decaywidget.is_active():
+            if self.mainwindow.tabwidget.decaywidget.active:
                 measurements += ', Muon Decay'
-            if self.mainwindow.tabwidget.velocitywidget.is_active():
+            if self.mainwindow.tabwidget.velocitywidget.active:
                 measurements += ', Muon Velocity'
-            if self.mainwindow.tabwidget.pulseanalyzerwidget.is_active():
+            if self.mainwindow.tabwidget.pulseanalyzerwidget.active:
                 measurements += ', Pulse Analyzer'
             self.measurements.setText(measurements)
             self.measurements.setEnabled(True)
@@ -705,27 +778,25 @@ class VelocityWidget(QtGui.QWidget):
                               QtCore.SIGNAL("clicked()"),
                               self.velocityFitRangeClicked
                               )
-        self.pulsefile = self.parentWidget().pulseextractor.pulsefile
+        self.pulsefile = self.mainwindow.pulseextractor.pulsefile
         
-    def calculate(self,pulses):
+    def calculate(self):
+        pulses = self.mainwindow.pulses
+        if pulses is None:
+            return
         flighttime = self.trigger.trigger(pulses,upperchannel=self.upper_channel,lowerchannel=self.lower_channel)
         if flighttime != None and flighttime > 0:
             #velocity = (self.channel_distance/((10**(-9))*flighttime))/C #flighttime is in ns, return in fractions of C
             self.logger.info("measured flighttime %s" %flighttime.__repr__())
             self.times.append(flighttime)
-                
-        
-    #FIXME: we should not name this update
-    #since update is already a member
+
+    #FIXME: we should not name this update since update is already a member
     def update(self):
         self.velocityfitrange_button.setEnabled(True)    
         self.velocityfit_button.setEnabled(True)
         self.findChild(VelocityCanvas,QtCore.QString("velocity_plot")).update_plot(self.times)
         self.times = []
 
-    def is_active(self):
-        return self.active
-    
     def velocityFitRangeClicked(self):
         """
         fit the muon velocity histogram
@@ -741,7 +812,7 @@ class VelocityWidget(QtGui.QWidget):
         """
         fit the muon velocity histogram
         """
-        print 'That is it ', self.fitrange
+        self.logger.debug("Using fitrange of %s" %self.fitrange.__repr__())
         fitresults = gaussian_fit(bincontent=n.asarray(self.velocitycanvas.heights),binning = self.binning, fitrange = self.fitrange)
         if not fitresults is None:
             self.velocitycanvas.show_fit(fitresults[0],fitresults[1],fitresults[2],fitresults[3],fitresults[4],fitresults[5],fitresults[6],fitresults[7])
@@ -766,16 +837,15 @@ class VelocityWidget(QtGui.QWidget):
                         self.lower_channel = chan + 1 #
             
                 self.logger.info("Switching off decay measurement if running!")
-                if self.parentWidget().parentWidget().decaywidget.is_active():
+                if self.parentWidget().parentWidget().decaywidget.active:
                     self.parentWidget().parentWidget().decaywidget.activateMuondecayClicked()
                 self.active = True
                 self.parentWidget().parentWidget().parentWidget().daq.put("CE")
                 self.parentWidget().parentWidget().ratewidget.startClicked()
-                self.pulsefile = self.parentWidget().parentWidget().pulseextractor.pulsefile
                 if not self.pulsefile:
-                    self.parentWidget().parentWidget().pulsefilename = os.path.join(self.parentWidget().parentWidget().DATAPATH,"%i-%i-%i_%i-%i-%i_%s_HOURS_%s%s" %(self.parentWidget().parentWidget().date.tm_year,self.parentWidget().parentWidget().date.tm_mon,self.parentWidget().parentWidget().date.tm_mday,self.parentWidget().parentWidget().date.tm_hour,self.parentWidget().parentWidget().date.tm_min,self.parentWidget().parentWidget().date.tm_sec,"P",self.parentWidget().parentWidget().opts.user[0],self.parentWidget().parentWidget().opts.user[1]))
-                    self.parentWidget().parentWidget().pulse_mes_start = self.parentWidget().parentWidget().now
-                    self.parentWidget().parentWidget().pulseextractor.pulsefile = open(self.parentWidget().parentWidget().pulsefilename,'w')
+                    self.mainwindow.pulsefilename = os.path.join(self.mainwindow.DATAPATH,"%i-%i-%i_%i-%i-%i_%s_HOURS_%s%s" %(self.mainwindow.date.tm_year,self.mainwindow.date.tm_mon,self.mainwindow.date.tm_mday,self.mainwindow.date.tm_hour,self.mainwindow.date.tm_min,self.mainwindow.date.tm_sec,"P",self.mainwindow.opts.user[0],self.mainwindow.opts.user[1]))
+                    self.mainwindow.pulse_mes_start = self.mainwindow.now
+                    self.mainwindow.pulseextractor.pulsefile = open(self.mainwindow.pulsefilename,'w')
 
 
             else:
@@ -785,19 +855,19 @@ class VelocityWidget(QtGui.QWidget):
             self.activateVelocity.setChecked(False)            
             self.active = False
             if not self.pulsefile:
-                self.parentWidget().parentWidget().pulsefilename = ''
-                self.parentWidget().parentWidget().pulse_mes_start = False
-                if self.parentWidget().parentWidget().pulseextractor.pulsefile:
-                    self.parentWidget().parentWidget().pulseextractor.pulsefile.close()
-                self.parentWidget().parentWidget().pulseextractor.pulsefile = False
+                self.mainwindow.pulsefilename = ''
+                self.mainwindow.pulse_mes_start = False
+                if self.mainwindow.pulseextractor.pulsefile:
+                    self.mainwindow.pulseextractor.pulsefile.close()
+                self.mainwindow.pulseextractor.pulsefile = False
 
-            self.parentWidget().parentWidget().ratewidget.stopClicked()  
+            self.mainwindow.tabwidget.ratewidget.stopClicked()  
 
 class DecayWidget(QtGui.QWidget):
     
     def __init__(self,logger,parent=None):
         QtGui.QWidget.__init__(self,parent=parent) 
-        self.logger = logger 
+        self.logger = logger
         self.mufit_button = QtGui.QPushButton(tr('MainWindow', 'Fit!'))
         self.mainwindow = self.parentWidget()        
         self.mufit_button.setEnabled(False)
@@ -860,13 +930,10 @@ class DecayWidget(QtGui.QWidget):
         decay_tab.addWidget(self.decayfitrange_button,4,1)
         self.findChild(QtGui.QLabel,QtCore.QString("muoncounter")).setText(tr("Dialog", "We have %i decayed muons " %self.muondecaycounter, None, QtGui.QApplication.UnicodeUTF8))
         self.findChild(QtGui.QLabel,QtCore.QString("lastdecay")).setText(tr("Dialog", "Last detected decay at time %s " %self.lastdecaytime, None, QtGui.QApplication.UnicodeUTF8))
-        
         #self.decaywidget = self.widget(1)
 
-    def is_active(self):
-        return self.active
-     
-    def calculate(self,pulses):
+    def calculate(self):
+        pulses = self.mainwindow.pulses
         #single_channel = self.singlepulsechannel, double_channel = self.doublepulsechannel, veto_channel = self.vetopulsechannel,mindecaytime = self.decay_mintime,minsinglepulsewidth = minsinglepulsewidth,maxsinglepulsewidth = maxsinglepulsewidth, mindoublepulsewidth = mindoublepulsewidth, maxdoublepulsewidth = maxdoublepulsewidth):
         decay =  self.trigger.trigger(pulses,single_channel = self.singlepulsechannel,double_channel = self.doublepulsechannel, veto_channel = self.vetopulsechannel, mindecaytime= self.decay_mintime,minsinglepulsewidth = self.minsinglepulsewidth,maxsinglepulsewidth = self.maxsinglepulsewidth, mindoublepulsewidth = self.mindoublepulsewidth, maxdoublepulsewidth = self.maxdoublepulsewidth )
         if decay != None:
@@ -884,27 +951,31 @@ class DecayWidget(QtGui.QWidget):
         """
         fitresults = fit(bincontent=n.asarray(self.lifetime_monitor.heights),binning = self.binning, fitrange = self.fitrange)
         if not fitresults is None:
-            self.lifetime_monitor.show_fit(fitresults[0],fitresults[1],fitresults[2],fitresults[3],fitresults[4],fitresults[5],fitresults[6],fitresults[7])
+            self.lifetime_monitor.show_fit(fitresults[0],fitresults[1],\
+                                           fitresults[2],fitresults[3],\
+                                           fitresults[4],fitresults[5],\
+                                           fitresults[6],fitresults[7])
 
     def update(self):
-        if self.decay:
-            self.mufit_button.setEnabled(True)
-            self.decayfitrange_button.setEnabled(True)
+        if not self.decay:
+            return
 
-            decay_times =  [decay_time[0] for decay_time in self.decay]
-            self.lifetime_monitor.update_plot(decay_times)
-            self.findChild(QtGui.QLabel,QtCore.QString("muoncounter")).setText(tr("Dialog", "We have %i decayed muons " %self.muondecaycounter, None, QtGui.QApplication.UnicodeUTF8))
-            self.findChild(QtGui.QLabel,QtCore.QString("lastdecay")).setText(tr("Dialog", "Last detected decay at time %s " %self.lastdecaytime, None, QtGui.QApplication.UnicodeUTF8))
-            for muondecay in self.decay:
-                #muondecay = self.decay[0] 
-                muondecay_time = muondecay[1].replace(' ','_')
-                self.mu_file.write('Decay ')
-                self.mu_file.write(muondecay_time.__repr__() + ' ')
-                self.mu_file.write(muondecay[0].__repr__())
-                self.mu_file.write('\n')
-                self.decay = []
-        else:
-            pass
+        self.mufit_button.setEnabled(True)
+        self.decayfitrange_button.setEnabled(True)
+
+        decay_times =  [decay_time[0] for decay_time in self.decay]
+        self.lifetime_monitor.update_plot(decay_times)
+        self.findChild(QtGui.QLabel,QtCore.QString("muoncounter")).setText(tr("Dialog", "We have %i decayed muons " %self.muondecaycounter, None, QtGui.QApplication.UnicodeUTF8))
+        self.findChild(QtGui.QLabel,QtCore.QString("lastdecay")).setText(tr("Dialog", "Last detected decay at time %s " %self.lastdecaytime, None, QtGui.QApplication.UnicodeUTF8))
+        for muondecay in self.decay:
+            #muondecay = self.decay[0]
+            muondecay_time = muondecay[1].replace(' ','_')
+            self.mu_file.write('Decay ')
+            self.mu_file.write(muondecay_time.__repr__() + ' ')
+            self.mu_file.write(muondecay[0].__repr__())
+            self.mu_file.write('\n')
+            self.decay = []
+
 
     def decayFitRangeClicked(self):
         """
@@ -962,7 +1033,7 @@ class DecayWidget(QtGui.QWidget):
                         if channel[1]:
                             self.vetopulsechannel = channel[0] + 1 # there is a mapping later from this to an index with an offset
                     self.logger.info("Switching off velocity measurement if running!")
-                    if self.parentWidget().parentWidget().velocitywidget.is_active():
+                    if self.parentWidget().parentWidget().velocitywidget.active:
                         self.parentWidget().parentWidget().velocitywidget.activateVelocityClicked()
 
                     self.logger.warn("We now activate the Muondecay mode!\n All other Coincidence/Veto settings will be overriden!")
@@ -985,7 +1056,8 @@ class DecayWidget(QtGui.QWidget):
                     self.dec_mes_start = now
                     #self.decaywidget.findChild("activate_mudecay").setChecked(True)
                     self.active = True
-                    self.parentWidget().parentWidget().ratewidget.startClicked()            
+                    #FIXME: is this intentional?
+                    #self.parentWidget().parentWidget().ratewidget.startClicked()
                     self.pulsefile = self.mainwindow.pulseextractor.pulsefile
                     if not self.pulsefile:
                         self.mainwindow.pulsefilename = os.path.join(self.mainwindow.DATAPATH,"%i-%i-%i_%i-%i-%i_%s_HOURS_%s%s" %(self.mainwindow.date.tm_year,self.mainwindow.date.tm_mon,self.mainwindow.date.tm_mday,self.mainwindow.date.tm_hour,self.mainwindow.date.tm_min,self.mainwindow.date.tm_sec,"P",self.mainwindow.opts.user[0],self.mainwindow.opts.user[1]))
@@ -1019,7 +1091,6 @@ class DAQWidget(QtGui.QWidget):
     def __init__(self,logger,parent=None):
         QtGui.QWidget.__init__(self,parent=parent)
         self.mainwindow = self.parentWidget()
-        
         self.write_file      = False
         self.label           = QtGui.QLabel(tr('MainWindow','Command'))
         self.hello_edit      = LineEdit()
@@ -1108,6 +1179,39 @@ class DAQWidget(QtGui.QWidget):
                 self.mainwindow.statusbar.removeWidget(self.periodic_status_label)
             except AttributeError:
                 pass
+
+    def calculate(self):
+        """
+        Function that is called via processincoming. It does:
+        - starts file writing stuff
+        """
+        self.text_box.appendPlainText(str(self.mainwindow.daq_msg))
+        if self.write_file:
+            #self.daq_file.write(self.mainwindow.daq_msg, status = self.mainwindow.statusline)
+            self.write_to_file(str(self.mainwindow.daq_msg))
+
+    def write_to_file(self,msg):
+        """
+        Write the "RAW" file
+        :param msg:
+        :return:
+        """
+
+        try:
+            if self.mainwindow.nostatus:
+                fields = msg.rstrip("\n").split(" ")
+                if ((len(fields) == 16) and (len(fields[0]) == 8)):
+                    self.outputfile.write(str(msg)+'\n')
+                else:
+                    self.logger.debug("Not writing line '%s' to file because it does not contain trigger data" %msg)
+            else:
+                self.outputfile.write(str(msg)+'\n')
+
+        except ValueError:
+            self.logger.warning('Trying to write on closed file, captured!')
+
+
+
 
 class GPSWidget(QtGui.QWidget):
 
@@ -1208,12 +1312,7 @@ class GPSWidget(QtGui.QWidget):
         self.text_box.appendPlainText('save to clicked - function out of order')        
         self.logger.info("Saving GPS informations still disabled.")
 
-    def is_active(self):
-        """
-        Is the GPS readout activated? return bool
-        """
-        return self.active
-    
+
     def switch_active(self, switch = False):
         """
         Switch the GPS activation status.
@@ -1225,7 +1324,7 @@ class GPSWidget(QtGui.QWidget):
                 self.active = True
         else:
             self.active = switch
-        return self.is_active()
+        return self.active
     
     def calculate(self):
         """

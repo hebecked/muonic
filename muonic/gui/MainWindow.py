@@ -21,12 +21,13 @@ import webbrowser
 # muonic imports
 from ..analysis import PulseAnalyzer as pa
 from ..daq.DAQProvider import DAQIOError
-from ..__version__ import __version__,__source_location__
+from ..__version__ import __version__,__source_location__,\
+__docs_hosted_at__
+from .styles import LargeScreenMPStyle
 
-
-from MuonicDialogs import ThresholdDialog,ConfigDialog,HelpDialog,DecayConfigDialog,PeriodicCallDialog,AdvancedDialog
-from MuonicPlotCanvases import ScalarsCanvas,LifetimeCanvas,PulseCanvas
-from MuonicWidgets import VelocityWidget,PulseanalyzerWidget,DecayWidget,DAQWidget,RateWidget, GPSWidget, StatusWidget
+from .MuonicDialogs import ThresholdDialog,ConfigDialog,HelpDialog,DecayConfigDialog,PeriodicCallDialog,AdvancedDialog
+from .MuonicPlotCanvases import ScalarsCanvas,LifetimeCanvas,PulseCanvas
+from .MuonicWidgets import VelocityWidget,PulseanalyzerWidget,DecayWidget,DAQWidget,RateWidget, GPSWidget, StatusWidget
 
 DOCPATH  = (os.path.dirname(os.path.abspath(__file__)) + os.sep + '..' + os.sep + 'docs' + os.sep + 'html')
 # this is hard-coded! There must be a better solution...
@@ -46,20 +47,36 @@ class MainWindow(QtGui.QMainWindow):
     """
 
     def __init__(self, daq, logger, opts,  win_parent = None):
-
         QtGui.QMainWindow.__init__(self, win_parent)
         self.daq = daq
         self.opts = opts
         self.DATAPATH = DATAPATH
+        self.daq_msg = False # try to establish upstream compatibility
+                             # B. introduced a DAQMessage here, but I think
+                             # this is overkill
+                             # however, making it a member allows to distribute
+                             # it more easily to daughter widgets
 
         # we have to ensure that the DAQcard does not sent
         # any automatic status reports every x seconds
-        self.daq.put('ST 0')
+        #FIXME: there was an option for that!
+        self.nostatus = opts.nostatus
+        if self.nostatus:
+            self.daq.put('ST 0')
 
         self.setWindowTitle(QtCore.QString("muonic") )
         self.statusbar = QtGui.QMainWindow.statusBar(self)
         self.logger  = logger
+        desktop = QtGui.QDesktopWidget()
+        screen_size = QtCore.QRectF(desktop.screenGeometry(desktop.primaryScreen()))
+        screen_x = screen_size.x() + screen_size.width()
+        screen_y = screen_size.y() + screen_size.height()
+        self.logger.info("Screen with size %i x %i detected!" %(screen_x,screen_y))
 
+        # FIXME: make it configurable
+        # now simply set to 1600 x 1200
+        if screen_x * screen_y >= 1920000:
+            LargeScreenMPStyle()
         self.date = time.gmtime()
         # put the file in the data directory
         # we chose a global format for naming the files -> decided on 18/01/2012
@@ -88,9 +105,6 @@ class MainWindow(QtGui.QMainWindow):
                 self.pulsefilename = ''
                 self.pulse_mes_start = False
 
-        self.nostatus = False
-        # this holds the scalars in the time interval
-        self.channel_counts = [0,0,0,0,0] #[trigger,ch0,ch1,ch2,ch3]
         self.daq.put('TL') # get the thresholds
         time.sleep(0.5) #give the daq some time to ract
         self.threshold_ch0 = 300
@@ -135,26 +149,6 @@ class MainWindow(QtGui.QMainWindow):
         self.pulseextractor = pa.PulseExtractor(pulsefile=self.pulsefilename) 
         self.pulses = None
 
-        # prepare fields for scalars 
-        self.scalars_ch0_previous = 0
-        self.scalars_ch1_previous = 0
-        self.scalars_ch2_previous = 0
-        self.scalars_ch3_previous = 0
-        self.scalars_trigger_previous = 0
-        self.scalars_time = 0
-        # define the begin of the timeintervall 
-        # for the rate calculation
-        now = time.time()
-        self.thisscalarquery = now
-        self.lastscalarquery = now
-        self.query_daq_for_scalars()
-        while self.daq.data_available():
-            try:
-                msg = self.daq.get(0)
-                self.get_scalars_from_queue(msg)
-            except DAQIOError:
-                self.logger.debug("Queue empty!")
-        
         # A timer to periodically call processIncoming and check what is in the queue
         self.timer = QtCore.QTimer()
         QtCore.QObject.connect(self.timer,
@@ -169,7 +163,7 @@ class MainWindow(QtGui.QMainWindow):
         #this is a stupid comment for getting upload permission ;)  
         self.tabwidget.mainwindow = self.parentWidget()
 
-        self.timewindow = 5.0
+        self.timewindow = opts.timewindow #5.0
         self.logger.info("Timewindow is %4.2f" %self.timewindow)
 
         self.tabwidget.addTab(RateWidget(logger,parent = self),"Muon Rates")
@@ -193,8 +187,22 @@ class MainWindow(QtGui.QMainWindow):
         self.tabwidget.addTab(GPSWidget(logger,parent=self),"GPS Output")
         self.tabwidget.gpswidget = self.tabwidget.widget(6)
 
+        # widgets which should be calculated in processIncoming.
+        # The widget is only calculated when it is set to active (True)
+        #  via widget.active
+        # only widgets which need pulses go here
+        self.tabwidget.pulse_widgets = [self.tabwidget.pulseanalyzerwidget,\
+                                            self.tabwidget.velocitywidget,\
+                                            self.tabwidget.decaywidget]
+        # the others go in this list
+        self.tabwidget.nopulse_widget = [self.tabwidget.ratewidget]
+
         # widgets which shuld be dynmacally updated by the timer should be in this list
-        self.tabwidget.dynamic_widgets = [self.tabwidget.decaywidget,self.tabwidget.pulseanalyzerwidget,self.tabwidget.velocitywidget,self.tabwidget.ratewidget]
+        self.tabwidget.dynamic_widgets = [self.tabwidget.decaywidget,\
+                                          self.tabwidget.pulseanalyzerwidget,\
+                                          self.tabwidget.velocitywidget,\
+                                          self.tabwidget.ratewidget]
+
         self.widgetupdater = QtCore.QTimer()
         QtCore.QObject.connect(self.widgetupdater,
                            QtCore.SIGNAL("timeout()"),
@@ -428,12 +436,12 @@ class MainWindow(QtGui.QMainWindow):
         Show the sphinx documentation that comes with muonic in a
         browser
         """
-        docs = (os.path.join(DOCPATH,"index.html"))
-
-        self.logger.info("opening docs from %s" %docs)
+        #docs = (os.path.join(DOCPATH,"index.html"))
+        docs = __docs_hosted_at__
+        self.logger.debug("Opening docs from %s" %docs)
         success = webbrowser.open(docs)
         if not success:
-            self.logger.warning("Can not open webbrowser!")
+            self.logger.warning("Can not open webbrowser! Browse to %s to see the docs" %docs)
 
     def manualdoc_menu(self):
         """
@@ -447,58 +455,6 @@ class MainWindow(QtGui.QMainWindow):
             self.logger.warning("Can not open PDF reader!")
 
 
-
-    def query_daq_for_scalars(self):
-        """
-        Send a "DS" message to DAQ and record the time when this is don
-        """
-        self.lastscalarquery = self.thisscalarquery
-        self.daq.put("DS")
-        self.thisscalarquery = time.time()
-
-    def get_scalars_from_queue(self,msg):
-        """
-        Explicitely scan a message for scalar informatioin
-        Returns True if found, else False
-        """
-        
-        if len(msg) >= 2 and msg[0]=='D' and msg[1] == 'S':                    
-            self.scalars = msg.split()
-            time_window = self.thisscalarquery - self.lastscalarquery
-            self.logger.debug("Time window %s" %time_window)
-            errors = False
-
-            for item in self.scalars:
-                if ("S0" in item) & (len(item) == 11):
-                    self.scalars_ch0 = int(item[3:],16)
-                elif ("S1" in item) & (len(item) == 11):
-                    self.scalars_ch1 = int(item[3:],16)
-                elif ("S2" in item) & (len(item) == 11):
-                    self.scalars_ch2 = int(item[3:],16)
-                elif ("S3" in item) & (len(item) == 11):
-                    self.scalars_ch3 = int(item[3:],16)
-                elif ("S4" in item) & (len(item) == 11):
-                    self.scalars_trigger = int(item[3:],16)
-                elif ("S5" in item) & (len(item) == 11):
-                    self.scalars_time = float(int(item[3:],16))
-                #else:
-                    #self.logger.debug("unknown item detected: %s" %item.__repr__())
-                
-            self.scalars_diff_ch0 = self.scalars_ch0 - self.scalars_ch0_previous 
-            self.scalars_diff_ch1 = self.scalars_ch1 - self.scalars_ch1_previous 
-            self.scalars_diff_ch2 = self.scalars_ch2 - self.scalars_ch2_previous 
-            self.scalars_diff_ch3 = self.scalars_ch3 - self.scalars_ch3_previous 
-            self.scalars_diff_trigger = self.scalars_trigger - self.scalars_trigger_previous 
-            
-            self.scalars_ch0_previous = self.scalars_ch0
-            self.scalars_ch1_previous = self.scalars_ch1
-            self.scalars_ch2_previous = self.scalars_ch2
-            self.scalars_ch3_previous = self.scalars_ch3
-            self.scalars_trigger_previous = self.scalars_trigger
-            
-            return True
-        else:
-            return False 
                 
     def get_thresholds_from_queue(self,msg):
         """
@@ -623,44 +579,31 @@ class MainWindow(QtGui.QMainWindow):
 
             try:
                 msg = self.daq.get(0)
-
             except DAQIOError:
                 self.logger.debug("Queue empty!")
                 return None
 
+            self.daq_msg = msg #make it public for daughters
             # Check contents of message and do what it says
-            self.tabwidget.daqwidget.text_box.appendPlainText(str(msg))
-            if (self.tabwidget.gpswidget.is_active() and self.tabwidget.gpswidget.isEnabled()):
+            self.tabwidget.daqwidget.calculate()
+            if (self.tabwidget.gpswidget.active and self.tabwidget.gpswidget.isEnabled()):
                 if len(self.tabwidget.gpswidget.gps_dump) <= self.tabwidget.gpswidget.read_lines:
                     self.tabwidget.gpswidget.gps_dump.append(msg)
                 if len(self.tabwidget.gpswidget.gps_dump) == self.tabwidget.gpswidget.read_lines:
                     self.tabwidget.gpswidget.calculate()
                 continue
 
-            if (self.tabwidget.statuswidget.isVisible()) and self.tabwidget.statuswidget.is_active():
+            if (self.tabwidget.statuswidget.isVisible()) and self.tabwidget.statuswidget.active:
                 self.tabwidget.statuswidget.update()
 
-            if msg.startswith('DC') and len(msg) > 2 and self.tabwidget.decaywidget.is_active():
+            if msg.startswith('DC') and len(msg) > 2 and self.tabwidget.decaywidget.active:
                 try:
                     split_msg = msg.split(" ")
                     self.tabwidget.decaywidget.previous_coinc_time_03 = split_msg[4].split("=")[1]
                     self.tabwidget.decaywidget.previous_coinc_time_02 = split_msg[3].split("=")[1]
                 except:
                     self.logger.debug('Wrong DC command.')
-
-            if self.tabwidget.daqwidget.write_file:
-                try:
-                    if self.nostatus:
-                        fields = msg.rstrip("\n").split(" ")
-                        if ((len(fields) == 16) and (len(fields[0]) == 8)):
-                            self.tabwidget.daqwidget.outputfile.write(str(msg)+'\n')
-                        else:
-                            self.logger.debug("Not writing line '%s' to file because it does not contain trigger data" %msg)
-                    else:
-                        self.tabwidget.daqwidget.outputfile.write(str(msg)+'\n')
-
-                except ValueError:
-                    self.logger.warning('Trying to write on closed file, captured!')
+                continue
 
             # check for threshold information
             if self.get_thresholds_from_queue(msg):
@@ -669,58 +612,36 @@ class MainWindow(QtGui.QMainWindow):
             if self.get_channels_from_queue(msg):
                 continue
 
-
             # status messages
             if msg.startswith('ST') or len(msg) < 50:
                 continue
-            
-            if self.get_scalars_from_queue(msg):
-                time_window = self.thisscalarquery - self.lastscalarquery
-                rates = (self.scalars_diff_ch0/time_window,self.scalars_diff_ch1/time_window,self.scalars_diff_ch2/time_window,self.scalars_diff_ch3/time_window, self.scalars_diff_trigger/time_window, time_window, self.scalars_diff_ch0, self.scalars_diff_ch1, self.scalars_diff_ch2, self.scalars_diff_ch3, self.scalars_diff_trigger)
-                self.tabwidget.ratewidget.calculate(rates)
-                
-                #print self.tabwidget.scalars_result
-                #write the rates to data file
-                # we have to catch IOErrors, can occur if program is 
-                # exited
-                if self.tabwidget.ratewidget.data_file_write:
-                    try:
-                        self.tabwidget.ratewidget.data_file.write('%f %f %f %f %f %f %f %f %f %f \n' % (self.scalars_diff_ch0, self.scalars_diff_ch1, self.scalars_diff_ch2, self.scalars_diff_ch3, self.scalars_diff_ch0/time_window,self.scalars_diff_ch1/time_window,self.scalars_diff_ch2/time_window,self.scalars_diff_ch3/time_window,self.scalars_diff_trigger/time_window,time_window))
-                        self.logger.debug("Rate plot data was written to %s" %self.tabwidget.ratewidget.data_file.__repr__())
-                    except ValueError:
-                        self.logger.warning("ValueError, Rate plot data was not written to %s" %self.tabwidget.ratewidget.data_file.__repr__())
-                continue
-            
-            elif (self.tabwidget.decaywidget.is_active() or self.tabwidget.pulseanalyzerwidget.is_active() or self.pulsefilename or self.tabwidget.velocitywidget.active):#self.showpulses or self.pulsefilename) :
-                self.pulses = self.pulseextractor.extract(msg)
-                if self.pulses != None:
-                    #self.pulses_to_show = self.pulses
-                    self.tabwidget.pulseanalyzerwidget.calculate(self.pulses)
-                    # we have to count the triggers in the time intervall
-                    # FIXME: find a method to calculate rate from 
-                    # previously taken RAW file
-                    self.channel_counts[0] += 1                         
-                    for channel,pulses in enumerate(self.pulses[1:]):
-                        if pulses:
-                            for pulse in pulses:
-                                self.channel_counts[channel + 1] += 1
-               
-                    if self.tabwidget.velocitywidget.active:
-                        self.tabwidget.velocitywidget.calculate(self.pulses)
 
-                    if self.tabwidget.decaywidget.is_active():
-                        self.tabwidget.decaywidget.calculate(self.pulses)
+            if self.tabwidget.ratewidget.calculate():
                 continue
             
+            if (self.tabwidget.decaywidget.active or\
+                        self.tabwidget.pulseanalyzerwidget.active or\
+                        self.pulsefilename or\
+                        self.tabwidget.velocitywidget.active): #self.showpulses or self.pulsefilename) :
+                    self.pulses = self.pulseextractor.extract(msg)
+
+            self.widgetCalculate()
+
+
+    def widgetCalculate(self):
+        """
+        Starts the widgets calculate function inside the processIncoming. Set active flag (second parameter in the calculate_widgets list) to True if it should run only when the widget is active.
+        """
+        for widget in self.tabwidget.pulse_widgets:
+            if widget.active and (self.pulses is not None):
+                widget.calculate()
+
     def widgetUpdate(self):
         """
         Update the widgets
         """
-    
-        # this fct is called every timewindow - so we have to query for scalars
-        self.query_daq_for_scalars()
         for widg in self.tabwidget.dynamic_widgets:
-            if widg.is_active():
+            if widg.active:
                 widg.update()
 
     def closeEvent(self, ev):
@@ -735,6 +656,8 @@ class MainWindow(QtGui.QMainWindow):
                 'Do you really want to exit?', QtGui.QMessageBox.Yes, QtGui.QMessageBox.No)
 
         if reply == QtGui.QMessageBox.Yes:
+            self.timer.stop()
+            self.widgetupdater.stop()
             now = datetime.datetime.now()
 
             # close the RAW file (if any)
@@ -747,8 +670,7 @@ class MainWindow(QtGui.QMainWindow):
                 shutil.move(self.rawfilename,newrawfilename)
                 self.tabwidget.daqwidget.outputfile.close()
 
-            if self.tabwidget.decaywidget.is_active():
-
+            if self.tabwidget.decaywidget.active:
                 mtime = now - self.tabwidget.decaywidget.dec_mes_start
                 mtime = round(mtime.seconds/(3600.),2) + mtime.days*86400
                 self.logger.info("The muon decay measurement was active for %f hours" % mtime)

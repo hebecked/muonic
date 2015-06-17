@@ -144,7 +144,7 @@ class ScalarsCanvas(MuonicPlotCanvas):
         self.MAXLENGTH = MAXLENGTH
         self.reset()
         
-    def reset(self):
+    def reset(self,show_pending = False):
         """reseting all data"""
 
         self.ax.clear()
@@ -174,7 +174,22 @@ class ScalarsCanvas(MuonicPlotCanvas):
         self.N2 = 0
         self.N3 = 0
         self.NT = 0
-        
+
+        if show_pending:
+            left, width = .25, .5
+            bottom, height = .35, .8
+            right = left + width
+            top = bottom + height
+            #pr_ax = self.ax.reshape(-1)[0]
+            self.ax.text(0.5*(left+right), 0.5*(bottom+top), 'Measuring...',
+            horizontalalignment='center',
+            verticalalignment='center',
+            fontsize=56, color='red',
+            fontweight="heavy",
+            alpha=.8,
+            rotation=30,
+            transform=self.fig.transFigure)
+
         self.fig.canvas.draw()
 
     def update_plot(self, result, trigger = False,channelcheckbox_0 = True,channelcheckbox_1 = True,channelcheckbox_2 = True,channelcheckbox_3 = True):
@@ -265,8 +280,10 @@ class MuonicHistCanvas(MuonicPlotCanvas):
         #super(MuonicHistCanvas,self).__init__(self,parent,logger,**kwargs)
         MuonicPlotCanvas.__init__(self,parent,logger,**kwargs)
         self.binning = binning
-        self.bincontent   = self.ax.hist(n.array([]), self.binning, fc=histcolor, alpha=0.25)[0]
-        self.hist_patches = self.ax.hist(n.array([]), self.binning, fc=histcolor, alpha=0.25)[2]
+        self.bincontent   = n.zeros(len(binning-1))
+        self.hist_patches = self.ax.hist(n.array([self.binning[0]-1]), 
+                                         self.binning, fc=histcolor, 
+                                         alpha=0.25)[2]
         self.heights = []
         self.underflow = 0 #FIXME the current implementation does not know about outliers
         self.overflow  = 0 #FIXME the current implementation does not know about outliers
@@ -343,6 +360,8 @@ class MuonicHistCanvas(MuonicPlotCanvas):
     def show_fit(self,bin_centers,bincontent,fitx,decay,p,covar,chisquare,nbins):
 
         #self.ax.clear()
+        #print decay(p,fitx)
+        #print p
         self.ax.plot(bin_centers,bincontent,"b^",fitx,decay(p,fitx),"b-")
         #FIXME: this seems to crop the histogram
         #self.ax.set_ylim(0,max(bincontent)*1.2)
